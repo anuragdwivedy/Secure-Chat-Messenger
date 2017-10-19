@@ -1,5 +1,7 @@
+
+# Secure-Chat-Messenger
 ******************************************************************
-NSProject CS 6740: Secure Instant Messaging System
+ Secure Instant Messaging System
 author: Anurag Dwivedy
 ******************************************************************
 
@@ -53,6 +55,3 @@ To register a new user run createPasswd.py present in server folder
 
 python createPasswd <newusername> <password>
 
-# Secure-Chat-Messenger
-
-USAGE:
