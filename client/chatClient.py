@@ -10,13 +10,17 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
+try:
+	f = open('chatConf.conf', 'r')
+	for line in f:
+		if 'Server' in line :
+			server, serverIp, serverPort = line.split(":",2)
+			host = serverIp 
+			port = int(serverPort)
 
-f = open('chatConf.conf', 'r')
-for line in f:
-        if 'Server' in line :
-		server, serverIp, serverPort = line.split(":",2)
-		host = serverIp 
-		port = int(serverPort)
+except:
+	print "Config File missing! Please make sure configuration file is in same folder!"
+	os._exit(1)
 challenge_response = '0'
 timestamp = 0.0
 global activeUserlist
@@ -106,9 +110,13 @@ def verifySignature(key,signature,message):
 			),
 			hashes.SHA256()
 		)
-	verifier.update(message)
-	verifier.verify()
-	return True
+	try:
+		verifier.update(message)
+		verifier.verify()
+		return True
+	except:
+		print "Error in verifying Signature!"
+		return False
 
 #function symmetric decryption 
 def symmetric_decryptServermsg(key, associated_data, iv, ciphertext, tag):
@@ -145,9 +153,11 @@ def peer_thread(ticket_socket, ticket_clientbytepublickey):
 	while True:
 		peer_data = ticket_socket.recv(4096)
 		if(peer_data.startswith('peerticket2')):
-			#print "recieved peer ticket 2"
 			responsetype, peer_auth2, signed_peer_DH_public_key, peer_DH_public_key = peer_data.split("***",3)
-			decrypted_peermsg = asymmetric_decryption(client_private_key, peer_auth2)
+			try:
+				decrypted_peermsg = asymmetric_decryption(client_private_key, peer_auth2)
+			except:
+				print "Error in assymmetric decrypting message!!!"	
 			client_username, ticket_username, ticket_timestamp, timestamp = decrypted_peermsg.split("***",3)
 			### verify ticket_timestamp to be less than 10 mins here
 			ticket_clientpublickey = load_pem_public_key(ticket_clientbytepublickey, backend=default_backend())
@@ -156,14 +166,20 @@ def peer_thread(ticket_socket, ticket_clientbytepublickey):
 				d2 = pyDH.DiffieHellman()
 				peer2_DH_public_key = d2.gen_public_key()
 				peer_sharedkey = d2.gen_shared_key(long(peer_DH_public_key))
-				signed_peer2_DH_public_key = sign_message(client_private_key, str(peer2_DH_public_key))
+				try:
+					signed_peer2_DH_public_key = sign_message(client_private_key, str(peer2_DH_public_key))
+				except:
+					print "Error in signing message!!!"
 				timestamp = get_timestamp()
 				nounce = os.urandom(16)
 				plaintext = timestamp +'***'+ nounce
 				additional_authenticated_data = b'peerticket3'
-				iv,ciphertext, tag = encrypt(peer_sharedkey[0:32], plaintext, additional_authenticated_data)
+				try:
+					iv,ciphertext, tag = encrypt(peer_sharedkey[0:32], plaintext, additional_authenticated_data)
+				except:
+					print "Error in symmetric encryption!!!"
 				ticket_socket.send('peerticket3'+'***'+iv+'***'+ciphertext+'***'+ tag +'***'+additional_authenticated_data+'***'+signed_peer2_DH_public_key+'***'+str(peer2_DH_public_key))
-				#print "peerticket3 sent"
+				
 		
 		if(peer_data.startswith('peerticket4')):
 			responsetype, nounceresponse = peer_data.split("***",1)
@@ -172,21 +188,33 @@ def peer_thread(ticket_socket, ticket_clientbytepublickey):
 				
 				activeuserslist.append((ticket_username, peer_sharedkey[0:32],ticket_socket))
 				authclientlist.append(ticket_username)
-				#print activeuserslist
 				additional_authenticated_data = b'message'
 				plaintext = onetime_message + '***' + get_timestamp() + '***' + client_username
-				iv, ciphertext, tag = encrypt(peer_sharedkey[0:32], plaintext, additional_authenticated_data)
-				signature_hash = sign_message( client_private_key,hashm(onetime_message))
+				try:
+					iv, ciphertext, tag = encrypt(peer_sharedkey[0:32], plaintext, additional_authenticated_data)
+				except:
+					print "Error in symmetric encryption!!!"
+				try:
+					signature_hash = sign_message( client_private_key,hashm(onetime_message))
+				except:
+					print "Error in signing message!!!"	
 				ticket_socket.send('message'+'***'+iv +'***'+ ciphertext+'***'+ tag+'***'+additional_authenticated_data +'***'+signature_hash+'***'+hashm(onetime_message))
 
 
 		if(peer_data.startswith('message')):
 			responsetype, iv, ciphertext, tag, associated_data, signature, hashofmessage = peer_data.split("***",6)
 			decryptedmessage = symmetric_decryptServermsg(peer_sharedkey[0:32], associated_data, iv, ciphertext, tag)
-			message, timestamp, username2 = decryptedmessage.split('***', 2)
-			
-			if(verifySignature(ticket_clientpublickey,signature, hashm(message))):
-				print "<" + username2 + ">: " + message
+			message, timestamp, username2 = decryptedmessage.split('***', 2)	
+				
+			if(verifySignature(ticket_clientpublickey,signature, hashm(message)) and verifyTimestamp(timestamp)):
+				# verify timestamp and then print
+				if (message == 'logout'):
+					for authuserobject in activeuserslist:
+						if username2 in authuserobject:
+							activeuserslist.remove(authuserobject)
+							authclientlist.remove(username2)		
+				else:
+					print "<" + username2 + ">: " + message					
 
 
 
@@ -202,48 +230,57 @@ def listen_sub_thread(accept_socket,address_socket):
 	while True:
 		listen_data = accept_socket.recv(4096)
 		if(listen_data.startswith('peerticket1')):
-			#print "reccived peer ticket 1"
 			response_type, response= listen_data.split('***',1)
 			iv, ciphertext, tag, additional_authenticated_data = response.split("***",3)
-			decryptedticket = symmetric_decryptServermsg(dhClient_sharedkey[0:32],additional_authenticated_data,iv,ciphertext,tag)
+			try:
+				decryptedticket = symmetric_decryptServermsg(dhClient_sharedkey[0:32],additional_authenticated_data,iv,ciphertext,tag)
+			except:
+				print "Error in symmetric decryption!!!"
 			timestamp, ticket_timestamp, client_username, ticket_username, ticket_IP, ticket_strport, ticket_clientbytepublickey = decryptedticket.split("***",6)
 			ticket_clientpublickey = load_pem_public_key(ticket_clientbytepublickey, backend=default_backend())
 			timestamp = get_timestamp()
-			peer_auth2 = asymmetric_encryption(ticket_clientpublickey, client_username+'***'+ticket_username+'***'+ticket_timestamp+'***'+timestamp)
+			try:
+				peer_auth2 = asymmetric_encryption(ticket_clientpublickey, client_username+'***'+ticket_username+'***'+ticket_timestamp+'***'+timestamp)
+			except:
+				print "Error in asymmetric encryption!!!"
 			d2 = pyDH.DiffieHellman()
 			peer_DH_public_key = d2.gen_public_key()
-			signed_peer_DH_public_key = sign_message(client_private_key, str(peer_DH_public_key))
+			try:
+				signed_peer_DH_public_key = sign_message(client_private_key, str(peer_DH_public_key))
+			except:
+				print "Error in symmetric encryption!!!"
 			accept_socket.send('peerticket2' +'***'+ peer_auth2 + '***'+signed_peer_DH_public_key+'***'+str(peer_DH_public_key))
-			#print "peerticket2 sent"
 
 		if(listen_data.startswith('peerticket3')):
-			responsetype, iv, ciphertext, tag, additional_authenticated_data, signed_peer2_DH_public_key, peer2_DH_public_key = listen_data.split('***',6)
+			responsetype, iv, ciphertext, tag, additional_authenticated_data3, signed_peer2_DH_public_key, peer2_DH_public_key = listen_data.split('***',6)
 			if(verifySignature(ticket_clientpublickey,signed_peer2_DH_public_key, peer2_DH_public_key)):
 				peer_sharedkey = d2.gen_shared_key(long(peer2_DH_public_key))
-				decryptedmessage = symmetric_decryptServermsg(peer_sharedkey[0:32],additional_authenticated_data,iv,ciphertext,tag)
+				try:
+					decryptedmessage = symmetric_decryptServermsg(peer_sharedkey[0:32],additional_authenticated_data3,iv,ciphertext,tag)
+				except:
+					print "Error in symmetric decryption!!!"
 				timestamp, nounce= decryptedmessage.split('***',1)
 				if (verifyTimestamp(timestamp)):
 					accept_socket.send('peerticket4' +'***'+ nounce)
 					activeuserslist.append((client_username,peer_sharedkey[0:32],accept_socket))
 					authclientlist.append(client_username)
-					#print activeuserslist
 				
 
 		if(listen_data.startswith('message')):
 			responsetype, iv, ciphertext, tag, associated_data, signature, hashofmessage = listen_data.split("***",6)
-			decryptedmessage = symmetric_decryptServermsg(peer_sharedkey[0:32], associated_data, iv, ciphertext, tag)
+			try:
+				decryptedmessage = symmetric_decryptServermsg(peer_sharedkey[0:32], associated_data, iv, ciphertext, tag)
+			except:
+				print "Error in symmetric decryption!!!"	
 			message, timestamp, username2 = decryptedmessage.split('***', 2)
 			
-			if(verifySignature(ticket_clientpublickey,signature, hashm(message))):
+			if(verifySignature(ticket_clientpublickey,signature, hashm(message)) and verifyTimestamp(timestamp)):
 				# verify timestamp and then print
 				if (message == 'logout'):
 					for authuserobject in activeuserslist:
 						if username2 in authuserobject:
 							activeuserslist.remove(authuserobject)
-							authclientlist.remove(username2)
-					print activeuserslist
-					print '------------'
-					print authclientlist		
+							authclientlist.remove(username2)		
 				else:
 					print "<" + username2 + ">: " + message			
 
@@ -258,7 +295,10 @@ def receive_thread(client_socket, listening_socket,):
 		if response.startswith('listresponse'):	
 			
 			responsetype,iv,ciphertext,tag,addn_data,dnp = response.split("***",5)
-			decryptedserver_Optionresponse = symmetric_decryptServermsg(dhClient_sharedkey[0:32],addn_data,iv,ciphertext,tag)
+			try:
+				decryptedserver_Optionresponse = symmetric_decryptServermsg(dhClient_sharedkey[0:32],addn_data,iv,ciphertext,tag)
+			except:
+				print "Error in symmetric decryption!!!"
 			activelist,timestamp = decryptedserver_Optionresponse.split("***",1)
 			if (verifyTimestamp(timestamp)):
 				activeUserlist = pickle.loads(activelist)
@@ -276,7 +316,10 @@ def receive_thread(client_socket, listening_socket,):
 		if response.startswith('ticketresponse'):
 			ticket_to_a, ticket = response.split(":::",1)
 			responsetype,iv,ciphertext,tag, additional_authenticated_data = ticket_to_a.split("***",4)
-			decryptedticket_to_a = symmetric_decryptServermsg(dhClient_sharedkey[0:32],additional_authenticated_data,iv,ciphertext,tag)
+			try:
+				decryptedticket_to_a = symmetric_decryptServermsg(dhClient_sharedkey[0:32],additional_authenticated_data,iv,ciphertext,tag)
+			except:
+				print "Error in symmetric encryption!!!"
 			timestamp, ticket_timestamp, clientusername, ticket_Username, ticket_IP, ticket_port, ticket_clientbytepublickey = decryptedticket_to_a.split("***",6)
 			ticket_socket = socket.socket()         # Create a socket object
 			ticket_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -284,12 +327,14 @@ def receive_thread(client_socket, listening_socket,):
 			t2 = threading.Thread( target=peer_thread, args=(ticket_socket,ticket_clientbytepublickey, ))
 			t2.start()
 			ticket_socket.send('peerticket1' +'***'+ ticket)
-			#print "peer ticket sent"
 
 		
 		if response.startswith('logout'):
 			responsetype,iv,ciphertext,tag,additional_authenticated_data = response.split("***",4)
-			decryptedlogout_to_a = symmetric_decryptServermsg(dhClient_sharedkey[0:32],additional_authenticated_data,iv,ciphertext,tag)
+			try:
+				decryptedlogout_to_a = symmetric_decryptServermsg(dhClient_sharedkey[0:32],additional_authenticated_data,iv,ciphertext,tag)
+			except:
+				print "Error in symmetric decryption!!!"
 			timestamp, nounce = decryptedlogout_to_a.split("***",1)
 			if (nounce == logoutnounce):
 				for peerobject in activeuserslist:
@@ -297,8 +342,11 @@ def receive_thread(client_socket, listening_socket,):
 					user, key, peersocket = peerobject[0], peerobject[1],peerobject[2]
 					additional_authenticated_data = b'message'
 					plaintext = 'logout' + '***' + get_timestamp() + '***' + username
-					iv, ciphertext, tag = encrypt(key, plaintext, additional_authenticated_data)
-					signature_hash = sign_message( client_private_key,hashm('logout'))
+					try:				
+						iv, ciphertext, tag = encrypt(key, plaintext, additional_authenticated_data)
+						signature_hash = sign_message( client_private_key,hashm('logout'))
+					except:
+						print "Error in symmetric encryption!!!"
 					peersocket.send('message'+'***'+iv +'***'+ ciphertext+'***'+ tag+'***'+additional_authenticated_data +'***'+signature_hash+'***'+hashm('logout'))
 
 				print "logout successfull!"
@@ -309,7 +357,7 @@ def receive_thread(client_socket, listening_socket,):
 			print response
 
 if __name__ == "__main__":
-	#try:
+	try:
 		try:	
 			client_socket = socket.socket()         # Create a socket object
 			client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -334,8 +382,10 @@ if __name__ == "__main__":
 		client_private_key, client_public_key = generate_asymmetric_key()
 		d1 = pyDH.DiffieHellman()
 		client_DH_public_key = d1.gen_public_key()
-		signed_DH_public_key = sign_message(client_private_key, str(client_DH_public_key))
-	
+		try:
+			signed_DH_public_key = sign_message(client_private_key, str(client_DH_public_key))
+		except:
+			print "Error in symmetric encryption!!!"
 		username = raw_input("username: ")
 		password = getpass.getpass()	
 
@@ -347,15 +397,21 @@ if __name__ == "__main__":
 		pem = client_public_key.public_bytes(encoding=serialization.Encoding.PEM,format=serialization.PublicFormat.SubjectPublicKeyInfo)
 		plaintext = timestamp+'***'+username+'***'+hash_of_password+'***'+pem
 		additional_authenticated_data = b'login'
-		iv,ciphertext, tag = encrypt(symmetric_key, plaintext, additional_authenticated_data)
-		symmetric_key = asymmetric_encryption(server_public_key, symmetric_key)
+		try:
+			iv,ciphertext, tag = encrypt(symmetric_key, plaintext, additional_authenticated_data)
+			symmetric_key = asymmetric_encryption(server_public_key, symmetric_key)
+		except:
+			print "Error in symmetric encryption!!!"
 		client_socket.send(challenge_response+'***'+signed_DH_public_key+'***'+symmetric_key+'***'+str(client_DH_public_key) +'***'+iv +'***'+ ciphertext+'***'+ tag+'***'+ additional_authenticated_data)
 		server_Response = client_socket.recv(4096)
 		if "Error" not in server_Response:
 			server_signed_DH_public_key,server_DH_public_key, iv,ciphertext,tag,addn_data = server_Response.split("***",5)
 			verifySignature(server_public_key,server_signed_DH_public_key,server_DH_public_key)
 			dhClient_sharedkey = d1.gen_shared_key(long(server_DH_public_key))
-			decryptedServerMessage = symmetric_decryptServermsg(dhClient_sharedkey[0:32],addn_data,iv,ciphertext,tag)
+			try:			
+				decryptedServerMessage = symmetric_decryptServermsg(dhClient_sharedkey[0:32],addn_data,iv,ciphertext,tag)
+			except:
+				print "Error in symmetric encryption!!!"
 			nounce,timestamp = decryptedServerMessage.split("***",1)
 			client_socket.send(nounce+'***'+str(listeningsocketdetails[1]))
 			server_authStatus = client_socket.recv(4096)
@@ -380,48 +436,57 @@ if __name__ == "__main__":
 		while True:
 			client_Option = sys.stdin.readline()
 			client_Option = client_Option.strip('\n')
-			#get_ActiveUserList(username,'list','1')
 			if (client_Option == 'list') :
 				get_ActiveUserList(username,client_Option,'0') 			
 				
 		
 			elif (client_Option.startswith('send')):
-			
-				option, username1, message = client_Option.split(' ',2)
-				if username1 in authclientlist:
+				try:				
+					option, username1, message = client_Option.split(' ',2)
+					if username1 in authclientlist:
 				
-					for userobject in activeuserslist:
-						if(username1 in userobject):
-							user, key, socket1 = userobject[0], userobject[1],userobject[2]
-							additional_authenticated_data = b'message'
-							plaintext = message + '***' + get_timestamp() + '***' + username
-							iv, ciphertext, tag = encrypt(key, plaintext, additional_authenticated_data)
-							signature_hash = sign_message( client_private_key,hashm(message))
-							socket1.send('message'+'***'+iv +'***'+ ciphertext+'***'+ tag+'***'+additional_authenticated_data +'***'+signature_hash+'***'+hashm(message))
+						for userobject in activeuserslist:
+							if(username1 in userobject):
+								user, key, socket1 = userobject[0], userobject[1],userobject[2]
+								additional_authenticated_data = b'message'
+								plaintext = message + '***' + get_timestamp() + '***' + username
+								try:
+									iv, ciphertext, tag = encrypt(key, plaintext, additional_authenticated_data)
+									signature_hash = sign_message( client_private_key,hashm(message))
+								except:
+									print "Error in signing message!!!"
+								socket1.send('message'+'***'+iv +'***'+ ciphertext+'***'+ tag+'***'+additional_authenticated_data +'***'+signature_hash+'***'+hashm(message))
 
-				else:
-					 
-					get_ActiveUserList(username,'list','1')
+					else:
+						 
+						get_ActiveUserList(username,'list','1')
 				
-					onetime_message = message
-					print "Requesting Ticket for: " + username1
-					plaintext = username+'***'+ username1 + '***' + get_timestamp()			
-					additional_authenticated_data = b'ticket'
-					iv,ciphertext,tag = encrypt(dhClient_sharedkey[0:32], plaintext, additional_authenticated_data)
-					client_socket.send(iv +'***'+ ciphertext+'***'+ tag+'***'+ additional_authenticated_data)
-				
+						onetime_message = message
+						print "Requesting Ticket for: " + username1
+						plaintext = username+'***'+ username1 + '***' + get_timestamp()			
+						additional_authenticated_data = b'ticket'
+						try:				
+							iv,ciphertext,tag = encrypt(dhClient_sharedkey[0:32], plaintext, additional_authenticated_data)
+						except:
+							print "Error in symmetric encryption!!!"					
+						client_socket.send(iv +'***'+ ciphertext+'***'+ tag+'***'+ additional_authenticated_data)
+				except:
+					print "Usage: send <username> <message>"
 			elif (client_Option == 'logout'):
 				global logoutnounce
 				logoutnounce = os.urandom(16)
 				plaintext = username + '***' + get_timestamp() +'***'+ logoutnounce		
 				additional_authenticated_data = b'logout'
-				iv,ciphertext,tag = encrypt(dhClient_sharedkey[0:32], plaintext, additional_authenticated_data)
+				try:
+					iv,ciphertext,tag = encrypt(dhClient_sharedkey[0:32], plaintext, additional_authenticated_data)
+				except:
+					print "Error in symmetric encryption!!!"
 				client_socket.send(iv +'***'+ ciphertext+'***'+ tag+'***'+ additional_authenticated_data)
 				
 						
 			else:
 				print "Invalid option! Try again!"	
 
-	#except:
-	#	print "Critical error!! Exiting application!!"
-	#	os._exit(1)
+	except:
+		print "Critical error!! Exiting application!!"
+		os._exit(1)
